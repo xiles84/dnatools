@@ -113,10 +113,17 @@ func main() {
 		}
 		// Search the genome using the trie.
 		results := searchTrie(genome, trie)
-		// Print results.
+		// Print results, annotating each found position with its DNA line from lineMap.
 		for pat, positions := range results {
-			// Optionally, you could annotate the positions with DNA line numbers from lineMap.
-			fmt.Printf("Pattern %q found at positions: %v\n", pat, positions)
+			var annotated []string
+			for _, pos := range positions {
+				lineNum := -1
+				if pos < len(lineMap) {
+					lineNum = lineMap[pos]
+				}
+				annotated = append(annotated, fmt.Sprintf("(%d, line %d)", pos, lineNum))
+			}
+			fmt.Printf("Pattern %q found at positions: %v\n", pat, annotated)
 		}
 	} else {
 		fmt.Println("Please provide -m to build index, -s <sequence> for suffix array search, or -t <file> for trie search (used with -f).")
