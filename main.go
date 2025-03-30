@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"os"
@@ -8,7 +9,13 @@ import (
 	"strings"
 )
 
-// main parses the command-line flags and either builds the index or performs a search.
+// SuffixEntry holds the suffix array entry, the originating line and LCP value.
+type SuffixEntry struct {
+	Pos  int
+	Line int
+	LCP  int
+}
+
 func main() {
 	indexMode := flag.Bool("m", false, "Index mode: build suffix array index")
 	searchQueryStr := flag.String("s", "", "Search mode: search for sequence")
@@ -21,35 +28,80 @@ func main() {
 		fmt.Println("Error reading genome file:", err)
 		os.Exit(1)
 	}
-	genome := strings.TrimSpace(string(data))
+
+	// Split file into lines (each representing a DNA sequence)
+	lines := strings.Split(string(data), "\n")
+	var sequences []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			sequences = append(sequences, trimmed)
+		}
+	}
+
+	// Build a concatenated string from all sequences using '$' as a separator,
+	// and build a mapping (lineMap) from each global position to the originating sequence index.
+	var genomeBuilder strings.Builder
+	var lineMap []int
+	for i, seq := range sequences {
+		for _, ch := range seq {
+			genomeBuilder.WriteRune(ch)
+			lineMap = append(lineMap, i) // record the originating line index
+		}
+		// Append separator if not the last sequence.
+		if i < len(sequences)-1 {
+			genomeBuilder.WriteByte('$')
+			lineMap = append(lineMap, -1) // -1 indicates a separator
+		}
+	}
+	genome := genomeBuilder.String()
 
 	if *indexMode {
 		fmt.Println("Building suffix array index using SAIS algorithm...")
-		// Encode the genome: add a sentinel 0 and shift characters so that 0 is reserved.
+
+		// Encode the concatenated genome: add a sentinel 0 and shift characters so that 0 is reserved.
 		encoded, alphabetSize := encodeString(genome)
 		sa := SAISEntryPoint(encoded, alphabetSize)
-		// Save the suffix array to a file (one index per line)
-		err = saveIndex("sa.idx", sa)
+
+		// Compute LCP array (Longest Common Prefix) using Kasai's algorithm.
+		lcp := computeLCP(genome, sa)
+
+		// Build suffix entries (each entry contains: global position, originating DNA line, and LCP).
+		entries := make([]SuffixEntry, len(sa))
+		for i, pos := range sa {
+			lineNum := -1
+			if pos < len(lineMap) {
+				lineNum = lineMap[pos]
+			}
+			entries[i] = SuffixEntry{Pos: pos, Line: lineNum, LCP: lcp[i]}
+		}
+
+		// Save the suffix array (with LCP and line information) to a file.
+		err = saveIndex("sa.idx", entries)
 		if err != nil {
 			fmt.Println("Error saving index:", err)
 			os.Exit(1)
 		}
 		fmt.Println("Index built and saved to sa.idx")
 	} else if *searchQueryStr != "" {
-		// Load the suffix array index
-		sa, err := loadIndex("sa.idx")
+		// In search mode, we need to reconstruct the genome in the same way.
+		// (We could also store the concatenated genome in the index file.)
+		// Load the suffix index with LCP and line information.
+		entries, err := loadIndex("sa.idx")
 		if err != nil {
 			fmt.Println("Error loading index:", err)
 			os.Exit(1)
 		}
 		fmt.Printf("Searching for sequence: %s\n", *searchQueryStr)
-		positions := searchSequence(genome, sa, *searchQueryStr)
+
+		// Search for the query in the genome.
+		positions := searchSequence(genome, entries, *searchQueryStr)
 		if len(positions) == 0 {
 			fmt.Println("Sequence not found.")
 		} else {
-			fmt.Println("Sequence found at positions:")
-			for _, pos := range positions {
-				fmt.Printf("%d ", pos)
+			fmt.Println("Sequence found at positions (global position, DNA line):")
+			for _, entry := range positions {
+				fmt.Printf("(%d, %d) ", entry.Pos, entry.Line)
 			}
 			fmt.Println()
 		}
@@ -58,32 +110,46 @@ func main() {
 	}
 }
 
-// saveIndex writes the suffix array to a file.
-func saveIndex(filename string, sa []int) error {
+// saveIndex writes the suffix entries to a file (one entry per line: pos, line, LCP).
+func saveIndex(filename string, entries []SuffixEntry) error {
 	var lines []string
-	for _, num := range sa {
-		lines = append(lines, strconv.Itoa(num))
+	for _, entry := range entries {
+		// Format: global position, DNA line number, LCP value
+		line := fmt.Sprintf("%d %d %d", entry.Pos, entry.Line, entry.LCP)
+		lines = append(lines, line)
 	}
 	content := strings.Join(lines, "\n")
 	return os.WriteFile(filename, []byte(content), 0644)
 }
 
-// loadIndex reads the suffix array from a file.
-func loadIndex(filename string) ([]int, error) {
-	data, err := os.ReadFile(filename)
+// loadIndex reads the suffix entries from a file.
+func loadIndex(filename string) ([]SuffixEntry, error) {
+	file, err := os.Open(filename)
 	if err != nil {
 		return nil, err
 	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	sa := make([]int, len(lines))
-	for i, line := range lines {
-		num, err := strconv.Atoi(line)
-		if err != nil {
-			return nil, err
+	defer file.Close()
+
+	var entries []SuffixEntry
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.Fields(line)
+		if len(parts) != 3 {
+			continue
 		}
-		sa[i] = num
+		pos, err1 := strconv.Atoi(parts[0])
+		lineNum, err2 := strconv.Atoi(parts[1])
+		lcpVal, err3 := strconv.Atoi(parts[2])
+		if err1 != nil || err2 != nil || err3 != nil {
+			continue
+		}
+		entries = append(entries, SuffixEntry{Pos: pos, Line: lineNum, LCP: lcpVal})
 	}
-	return sa, nil
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return entries, nil
 }
 
 // encodeString converts the input string into an int slice and appends a sentinel (0).
@@ -288,41 +354,71 @@ func lmsSubstringEqual(s []int, t []bool, i, j int) bool {
 	return false
 }
 
-// searchSequence uses binary search on the suffix array to locate all occurrences of query.
-func searchSequence(genome string, sa []int, query string) []int {
-	lb := lowerBound(genome, sa, query)
-	if lb == -1 {
-		return []int{}
+// computeLCP computes the Longest Common Prefix array using Kasai's algorithm.
+func computeLCP(s string, sa []int) []int {
+	n := len(sa)
+	lcp := make([]int, n)
+	rank := make([]int, n)
+	// Build rank array: rank[i] is the index of suffix starting at i in SA.
+	for i, pos := range sa {
+		if pos < n {
+			rank[pos] = i
+		}
 	}
-	ub := upperBound(genome, sa, query)
-	return sa[lb:ub]
+	h := 0
+	for i := 0; i < n; i++ {
+		if rank[i] > 0 {
+			j := sa[rank[i]-1]
+			// Compare characters starting at positions i and j.
+			for i+h < len(s) && j+h < len(s) && s[i+h] == s[j+h] {
+				h++
+			}
+			lcp[rank[i]] = h
+			if h > 0 {
+				h--
+			}
+		} else {
+			lcp[rank[i]] = 0
+		}
+	}
+	return lcp
 }
 
-// lowerBound finds the first position in SA whose suffix is not less than query.
-func lowerBound(genome string, sa []int, query string) int {
+// searchSequence uses binary search on the suffix entries to locate all occurrences of query.
+func searchSequence(genome string, entries []SuffixEntry, query string) []SuffixEntry {
+	lb := lowerBound(genome, entries, query)
+	if lb == -1 {
+		return []SuffixEntry{}
+	}
+	ub := upperBound(genome, entries, query)
+	return entries[lb:ub]
+}
+
+// lowerBound finds the first position in entries whose suffix is not less than query.
+func lowerBound(genome string, entries []SuffixEntry, query string) int {
 	lo := 0
-	hi := len(sa)
+	hi := len(entries)
 	for lo < hi {
 		mid := (lo + hi) / 2
-		if compareSuffix(genome, sa[mid], query) < 0 {
+		if compareSuffix(genome, entries[mid].Pos, query) < 0 {
 			lo = mid + 1
 		} else {
 			hi = mid
 		}
 	}
-	if lo < len(sa) && strings.HasPrefix(genome[sa[lo]:], query) {
+	if lo < len(entries) && strings.HasPrefix(genome[entries[lo].Pos:], query) {
 		return lo
 	}
 	return -1
 }
 
-// upperBound finds the first position in SA whose suffix is greater than query.
-func upperBound(genome string, sa []int, query string) int {
+// upperBound finds the first position in entries whose suffix is greater than query.
+func upperBound(genome string, entries []SuffixEntry, query string) int {
 	lo := 0
-	hi := len(sa)
+	hi := len(entries)
 	for lo < hi {
 		mid := (lo + hi) / 2
-		if compareSuffix(genome, sa[mid], query) <= 0 {
+		if compareSuffix(genome, entries[mid].Pos, query) <= 0 {
 			lo = mid + 1
 		} else {
 			hi = mid
