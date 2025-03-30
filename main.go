@@ -15,11 +15,16 @@ type SuffixEntry struct {
 }
 
 func main() {
-	indexMode := flag.Bool("m", false, "Index mode: build suffix array index")
-	searchQueryStr := flag.String("s", "", "Search mode: search for sequence using suffix array")
-	trieFile := flag.String("t", "", "Trie search mode: file containing multiple query patterns (one per line)")
-	fileName := flag.String("f", "genoma.txt", "Genome file name")
-	flag.Parse()
+	runApp(os.Args[1:])
+}
+
+func runApp(args []string) {
+	fs := flag.NewFlagSet("dnatools", flag.ExitOnError)
+	indexMode := fs.Bool("m", false, "Index mode: build suffix array index")
+	searchQueryStr := fs.String("s", "", "Search mode: search for sequence using suffix array")
+	trieFile := fs.String("t", "", "Trie search mode: file containing multiple query patterns (one per line)")
+	fileName := fs.String("f", "genoma.txt", "Genome file name")
+	fs.Parse(args)
 
 	// Read genome file.
 	data, err := os.ReadFile(*fileName)
