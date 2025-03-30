@@ -42,12 +42,11 @@ func TestSuffixArray(t *testing.T) {
 
 func TestComputeLCP(t *testing.T) {
 	// For "banana", the expected suffix array is [6,5,3,1,0,4,2]
-	// and the expected LCP array is [0,0,1,3,0,0,2]
+	// and the expected LCP array is [0, 0, 1, 3, 0, 0, 2]
 	input := "banana"
 	encoded, alphabetSize := encodeString(input)
 	sa := SAISEntryPoint(encoded, alphabetSize)
-	// Note: computeLCP expects the genome string; here we pass the input appended with the sentinel.
-	// Alternatively, if computeLCP were modified to work without the sentinel, adjust accordingly.
+	// Note: We pass input + "$" to simulate the trailing sentinel.
 	lcp := computeLCP(input+"$", sa)
 	expectedLCP := []int{0, 0, 1, 3, 0, 0, 2}
 	if !reflect.DeepEqual(lcp, expectedLCP) {
@@ -160,6 +159,34 @@ func TestSearchSequence(t *testing.T) {
 		if entry.Line != 1 {
 			t.Errorf("Query %q expected in line 1 but found in line %d", query2, entry.Line)
 		}
+	}
+}
+
+func TestTrieSearch(t *testing.T) {
+	// Sample genome string to search.
+	text := "ACGTACGT"
+	// Build a trie with multiple patterns.
+	trie := NewTrie()
+	patterns := []string{"ACG", "CGT", "TAC", "GTAC"}
+	for _, pat := range patterns {
+		trie.Insert(pat)
+	}
+
+	// Execute the trie search on the genome.
+	results := searchTrie(text, trie)
+	// Expected occurrences:
+	// "ACG" should be found starting at indices 0 and 4.
+	// "CGT" should be found starting at indices 1 and 5.
+	// "TAC" should be found starting at index 3.
+	// "GTAC" should be found starting at index 2.
+	expected := map[string][]int{
+		"ACG":  {0, 4},
+		"CGT":  {1, 5},
+		"TAC":  {3},
+		"GTAC": {2},
+	}
+	if !reflect.DeepEqual(results, expected) {
+		t.Errorf("Trie search results mismatch. Expected %v, got %v", expected, results)
 	}
 }
 

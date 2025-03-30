@@ -9,27 +9,78 @@ import (
 	"strings"
 )
 
-// SuffixEntry holds the suffix array entry, the originating line and LCP value.
+// SuffixEntry holds the suffix array entry, the originating line, and LCP value.
 type SuffixEntry struct {
 	Pos  int
 	Line int
 	LCP  int
 }
 
+// TrieNode represents a node in the trie.
+type TrieNode struct {
+	children map[rune]*TrieNode
+	isEnd    bool
+	pattern  string
+}
+
+// NewTrie creates a new empty trie node.
+func NewTrie() *TrieNode {
+	return &TrieNode{children: make(map[rune]*TrieNode)}
+}
+
+// Insert adds a pattern into the trie.
+func (node *TrieNode) Insert(pattern string) {
+	current := node
+	for _, ch := range pattern {
+		if current.children == nil {
+			current.children = make(map[rune]*TrieNode)
+		}
+		if _, exists := current.children[ch]; !exists {
+			current.children[ch] = &TrieNode{children: make(map[rune]*TrieNode)}
+		}
+		current = current.children[ch]
+	}
+	current.isEnd = true
+	current.pattern = pattern
+}
+
+// searchTrie scans the text and returns a map where each key is a pattern found
+// and the value is a slice of starting positions where that pattern occurs.
+func searchTrie(text string, root *TrieNode) map[string][]int {
+	results := make(map[string][]int)
+	// For each position in the text, try to match a pattern.
+	for i := 0; i < len(text); i++ {
+		current := root
+		for j := i; j < len(text); j++ {
+			ch := rune(text[j])
+			next, exists := current.children[ch]
+			if !exists {
+				break
+			}
+			current = next
+			if current.isEnd {
+				results[current.pattern] = append(results[current.pattern], i)
+			}
+		}
+	}
+	return results
+}
+
 func main() {
 	indexMode := flag.Bool("m", false, "Index mode: build suffix array index")
-	searchQueryStr := flag.String("s", "", "Search mode: search for sequence")
+	searchQueryStr := flag.String("s", "", "Search mode: search for sequence using suffix array")
+	trieFile := flag.String("t", "", "Trie search mode: file containing multiple query patterns (one per line)")
 	fileName := flag.String("f", "genoma.txt", "Genome file name")
 	flag.Parse()
 
-	// Read genome file
+	// Read genome file.
 	data, err := os.ReadFile(*fileName)
 	if err != nil {
 		fmt.Println("Error reading genome file:", err)
 		os.Exit(1)
 	}
 
-	// Split file into lines (each representing a DNA sequence)
+	// Build genome from file lines. Each nonempty line is a DNA sequence.
 	lines := strings.Split(string(data), "\n")
 	var sequences []string
 	for _, line := range lines {
@@ -38,35 +89,27 @@ func main() {
 			sequences = append(sequences, trimmed)
 		}
 	}
-
-	// Build a concatenated string from all sequences using '$' as a separator,
-	// and build a mapping (lineMap) from each global position to the originating sequence index.
 	var genomeBuilder strings.Builder
 	var lineMap []int
 	for i, seq := range sequences {
 		for _, ch := range seq {
 			genomeBuilder.WriteRune(ch)
-			lineMap = append(lineMap, i) // record the originating line index
+			lineMap = append(lineMap, i) // record originating line index
 		}
-		// Append separator if not the last sequence.
+		// Append a separator if not the last sequence.
 		if i < len(sequences)-1 {
 			genomeBuilder.WriteByte('$')
-			lineMap = append(lineMap, -1) // -1 indicates a separator
+			lineMap = append(lineMap, -1) // -1 indicates separator
 		}
 	}
 	genome := genomeBuilder.String()
 
+	// Index mode using suffix array (with LCP) remains as before.
 	if *indexMode {
 		fmt.Println("Building suffix array index using SAIS algorithm...")
-
-		// Encode the concatenated genome: add a sentinel 0 and shift characters so that 0 is reserved.
 		encoded, alphabetSize := encodeString(genome)
 		sa := SAISEntryPoint(encoded, alphabetSize)
-
-		// Compute LCP array (Longest Common Prefix) using Kasai's algorithm.
 		lcp := computeLCP(genome, sa)
-
-		// Build suffix entries (each entry contains: global position, originating DNA line, and LCP).
 		entries := make([]SuffixEntry, len(sa))
 		for i, pos := range sa {
 			lineNum := -1
@@ -75,38 +118,60 @@ func main() {
 			}
 			entries[i] = SuffixEntry{Pos: pos, Line: lineNum, LCP: lcp[i]}
 		}
-
-		// Save the suffix array (with LCP and line information) to a file.
 		err = saveIndex("sa.idx", entries)
 		if err != nil {
 			fmt.Println("Error saving index:", err)
 			os.Exit(1)
 		}
 		fmt.Println("Index built and saved to sa.idx")
+		// Suffix array search mode.
 	} else if *searchQueryStr != "" {
-		// In search mode, we need to reconstruct the genome in the same way.
-		// (We could also store the concatenated genome in the index file.)
-		// Load the suffix index with LCP and line information.
 		entries, err := loadIndex("sa.idx")
 		if err != nil {
 			fmt.Println("Error loading index:", err)
 			os.Exit(1)
 		}
 		fmt.Printf("Searching for sequence: %s\n", *searchQueryStr)
-
-		// Search for the query in the genome.
-		positions := searchSequence(genome, entries, *searchQueryStr)
-		if len(positions) == 0 {
+		results := searchSequence(genome, entries, *searchQueryStr)
+		if len(results) == 0 {
 			fmt.Println("Sequence not found.")
 		} else {
 			fmt.Println("Sequence found at positions (global position, DNA line):")
-			for _, entry := range positions {
+			for _, entry := range results {
 				fmt.Printf("(%d, %d) ", entry.Pos, entry.Line)
 			}
 			fmt.Println()
 		}
+		// Trie search mode: used with the -t flag.
+	} else if *trieFile != "" {
+		// Read the file containing multiple query patterns.
+		patternData, err := os.ReadFile(*trieFile)
+		if err != nil {
+			fmt.Println("Error reading trie file:", err)
+			os.Exit(1)
+		}
+		patternLines := strings.Split(string(patternData), "\n")
+		var patterns []string
+		for _, l := range patternLines {
+			trimmed := strings.TrimSpace(l)
+			if trimmed != "" {
+				patterns = append(patterns, trimmed)
+			}
+		}
+		// Build the trie from the query patterns.
+		trie := NewTrie()
+		for _, pat := range patterns {
+			trie.Insert(pat)
+		}
+		// Search the genome using the trie.
+		results := searchTrie(genome, trie)
+		// Print results.
+		for pat, positions := range results {
+			// Optionally, you could annotate the positions with DNA line numbers from lineMap.
+			fmt.Printf("Pattern %q found at positions: %v\n", pat, positions)
+		}
 	} else {
-		fmt.Println("Please provide -m to build index or -s <sequence> to search.")
+		fmt.Println("Please provide -m to build index, -s <sequence> for suffix array search, or -t <file> for trie search (used with -f).")
 	}
 }
 
@@ -114,7 +179,6 @@ func main() {
 func saveIndex(filename string, entries []SuffixEntry) error {
 	var lines []string
 	for _, entry := range entries {
-		// Format: global position, DNA line number, LCP value
 		line := fmt.Sprintf("%d %d %d", entry.Pos, entry.Line, entry.LCP)
 		lines = append(lines, line)
 	}
@@ -129,7 +193,6 @@ func loadIndex(filename string) ([]SuffixEntry, error) {
 		return nil, err
 	}
 	defer file.Close()
-
 	var entries []SuffixEntry
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
@@ -165,7 +228,6 @@ func encodeString(s string) ([]int, int) {
 		}
 	}
 	encoded[n] = 0
-	// The alphabet size is maxVal+1 (since we shifted all characters by 1)
 	return encoded, maxVal + 1
 }
 
@@ -188,9 +250,8 @@ func SAIS(s []int, K int, n int, SA []int, lmsNames []int) []int {
 		SA[0] = 0
 		return SA
 	}
-	// Step 1: Classify characters into S-type (true) and L-type (false)
 	t := make([]bool, n)
-	t[n-1] = true // sentinel is S-type
+	t[n-1] = true
 	for i := n - 2; i >= 0; i-- {
 		if s[i] < s[i+1] {
 			t[i] = true
@@ -200,23 +261,19 @@ func SAIS(s []int, K int, n int, SA []int, lmsNames []int) []int {
 			t[i] = t[i+1]
 		}
 	}
-	// Step 2: Identify LMS positions (positions i where t[i] is S-type and t[i-1] is L-type)
 	var lmsPositions []int
 	for i := 1; i < n; i++ {
 		if t[i] && !t[i-1] {
 			lmsPositions = append(lmsPositions, i)
 		}
 	}
-	// Step 3: Induced sort the LMS positions
 	SA = induceSort(s, SA, t, K, lmsPositions)
-	// Step 4: Extract sorted LMS positions from SA
 	var sortedLMS []int
 	for _, pos := range SA {
 		if pos > 0 && t[pos] && !t[pos-1] {
 			sortedLMS = append(sortedLMS, pos)
 		}
 	}
-	// Step 5: Name the LMS substrings
 	lmsNames = lmsNames[:n]
 	for i := range lmsNames {
 		lmsNames[i] = -1
@@ -235,24 +292,19 @@ func SAIS(s []int, K int, n int, SA []int, lmsNames []int) []int {
 		prev = pos
 	}
 	numNames := name + 1
-
-	// Step 6: Build the reduced problem
 	reduced := make([]int, 0, len(lmsPositions))
 	for _, pos := range lmsPositions {
 		reduced = append(reduced, lmsNames[pos])
 	}
-
 	var reducedSA []int
 	if numNames < len(reduced) {
 		reducedSA = SAIS(reduced, numNames, len(reduced), SA, lmsNames)
 	} else {
-		// If all names are unique then the order is already determined.
 		reducedSA = make([]int, len(reduced))
 		for i, name := range reduced {
 			reducedSA[name] = i
 		}
 	}
-	// Step 7: Map the reduced SA back to the original LMS positions and induce sort again.
 	orderedLMS := make([]int, len(reducedSA))
 	for i, idx := range reducedSA {
 		orderedLMS[i] = lmsPositions[idx]
@@ -264,11 +316,9 @@ func SAIS(s []int, K int, n int, SA []int, lmsNames []int) []int {
 	return SA
 }
 
-// induceSort performs the induced sorting given the LMS positions.
 func induceSort(s []int, SA []int, t []bool, K int, lms []int) []int {
 	bs := computeBucketSizes(s, K)
 	bucketTails := computeBucketTails(bs)
-	// Place LMS positions into the ends of their buckets.
 	for i := len(lms) - 1; i >= 0; i-- {
 		pos := lms[i]
 		c := s[pos]
@@ -276,7 +326,6 @@ func induceSort(s []int, SA []int, t []bool, K int, lms []int) []int {
 		bucketTails[c]--
 	}
 	bucketHeads := computeBucketHeads(bs)
-	// Induce L-type suffixes.
 	for i := range SA {
 		pos := SA[i]
 		if pos > 0 && !t[pos-1] {
@@ -286,7 +335,6 @@ func induceSort(s []int, SA []int, t []bool, K int, lms []int) []int {
 		}
 	}
 	bucketTails = computeBucketTails(bs)
-	// Induce S-type suffixes.
 	for i := len(SA) - 1; i >= 0; i-- {
 		pos := SA[i]
 		if pos > 0 && t[pos-1] {
@@ -298,7 +346,6 @@ func induceSort(s []int, SA []int, t []bool, K int, lms []int) []int {
 	return SA
 }
 
-// computeBucketSizes returns a slice with the counts for each symbol.
 func computeBucketSizes(s []int, K int) []int {
 	bs := make([]int, K)
 	for i := 0; i < len(s); i++ {
@@ -307,7 +354,6 @@ func computeBucketSizes(s []int, K int) []int {
 	return bs
 }
 
-// computeBucketHeads returns the starting index for each bucket.
 func computeBucketHeads(bs []int) []int {
 	heads := make([]int, len(bs))
 	sum := 0
@@ -318,7 +364,6 @@ func computeBucketHeads(bs []int) []int {
 	return heads
 }
 
-// computeBucketTails returns the ending index for each bucket.
 func computeBucketTails(bs []int) []int {
 	tails := make([]int, len(bs))
 	sum := 0
@@ -329,14 +374,12 @@ func computeBucketTails(bs []int) []int {
 	return tails
 }
 
-// lmsSubstringEqual compares the LMS substring starting at i with that at j.
 func lmsSubstringEqual(s []int, t []bool, i, j int) bool {
 	n := len(s)
 	for {
 		if s[i] != s[j] {
 			return false
 		}
-		// Check if both positions are LMS positions.
 		iIsLMS := (i > 0 && t[i] && !t[i-1])
 		jIsLMS := (j > 0 && t[j] && !t[j-1])
 		if iIsLMS && jIsLMS {
@@ -359,7 +402,6 @@ func computeLCP(s string, sa []int) []int {
 	n := len(sa)
 	lcp := make([]int, n)
 	rank := make([]int, n)
-	// Build rank array: rank[i] is the index of suffix starting at i in SA.
 	for i, pos := range sa {
 		if pos < n {
 			rank[pos] = i
@@ -369,7 +411,6 @@ func computeLCP(s string, sa []int) []int {
 	for i := 0; i < n; i++ {
 		if rank[i] > 0 {
 			j := sa[rank[i]-1]
-			// Compare characters starting at positions i and j.
 			for i+h < len(s) && j+h < len(s) && s[i+h] == s[j+h] {
 				h++
 			}
@@ -394,7 +435,6 @@ func searchSequence(genome string, entries []SuffixEntry, query string) []Suffix
 	return entries[lb:ub]
 }
 
-// lowerBound finds the first position in entries whose suffix is not less than query.
 func lowerBound(genome string, entries []SuffixEntry, query string) int {
 	lo := 0
 	hi := len(entries)
@@ -412,7 +452,6 @@ func lowerBound(genome string, entries []SuffixEntry, query string) int {
 	return -1
 }
 
-// upperBound finds the first position in entries whose suffix is greater than query.
 func upperBound(genome string, entries []SuffixEntry, query string) int {
 	lo := 0
 	hi := len(entries)
@@ -427,7 +466,6 @@ func upperBound(genome string, entries []SuffixEntry, query string) int {
 	return lo
 }
 
-// compareSuffix compares the suffix of genome starting at pos with query.
 func compareSuffix(genome string, pos int, query string) int {
 	i := 0
 	for i < len(query) && pos+i < len(genome) {
